@@ -1,5 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {validateFundNav,calculateFundValue} from '../fund-auto.js';
+import {validateFundNav,calculateFundValue,tokyoMonthKey,applyMonthlyContribution} from '../fund-auto.js';
 const q={code:'0331418A',nav:37827,currency:'JPY',date:'2026-10-02',source:'Yahoo!ファイナンス'};
 test('保有口数と基準価額からオルカン評価額を計算する',()=>{assert.equal(calculateFundValue(100000,37827),378270);assert.equal(calculateFundValue(26436,37827),99999);assert.throws(()=>calculateFundValue(0,37827));assert.throws(()=>calculateFundValue(1.5,37827));});
 test('オルカン基準価額レスポンスを検証する',()=>{assert.deepEqual(validateFundNav(q),q);assert.throws(()=>validateFundNav({...q,code:'x'}));assert.throws(()=>validateFundNav({...q,currency:'USD'}));assert.throws(()=>validateFundNav({...q,date:'10/2'}));});
+test('日本時間の積立月を判定する',()=>{assert.equal(tokyoMonthKey(new Date('2026-09-30T15:30:00Z')),'2026-10');assert.equal(tokyoMonthKey(new Date('2026-10-31T14:59:59Z')),'2026-10');assert.equal(tokyoMonthKey(new Date('2026-10-31T15:00:00Z')),'2026-11');});
+test('月10万円を取得総額へ加算し保存済み基準価額で評価額を更新する',()=>{const fund={id:'f1',type:'fund',name:'オルカン',invested:300000,amount:330000,fundNav:37827};const next=applyMonthlyContribution(fund,105000);assert.equal(next.invested,400000);assert.equal(next.amount,397184);assert.equal(fund.invested,300000);assert.throws(()=>applyMonthlyContribution(fund,0));assert.throws(()=>applyMonthlyContribution({...fund,type:'cash'},105000));});
