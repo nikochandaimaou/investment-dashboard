@@ -1,7 +1,9 @@
 const PORTFOLIO_KEY='my-portfolio-v1';
 const UNITS_KEY='portfolio-fund-units-v1';
+const CONTRIBUTION_KEY='portfolio-fund-contributions-v1';
 const ENDPOINT_KEY='portfolio-quote-endpoint';
 const FUND_CODE='0331418A';
+const MONTHLY_CONTRIBUTION=100000;
 export function validateFundNav(q){
  if(!q || q.code!==FUND_CODE || q.currency!=='JPY' || typeof q.nav!=='number' || !Number.isFinite(q.nav) || q.nav<=0 || q.nav>1e9 || typeof q.date!=='string' || !/^20\d{2}-\d{2}-\d{2}$/.test(q.date))throw new Error('オルカンの基準価額データが正しくありません。');
  return q;
@@ -11,17 +13,34 @@ export function calculateFundValue(units,nav){
  if(typeof nav!=='number' || !Number.isFinite(nav) || nav<=0)throw new Error('基準価額が正しくありません。');
  return Math.round(units*nav/10000);
 }
+export function tokyoMonthKey(date=new Date()){
+ const shifted=new Date(date.getTime()+9*60*60*1000);
+ return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth()+1).padStart(2,'0')}`;
+}
+export function applyMonthlyContribution(asset,units,amount=MONTHLY_CONTRIBUTION){
+ if(!asset || asset.type!=='fund' || typeof asset.invested!=='number' || !Number.isFinite(asset.invested) || asset.invested<0)throw new Error('オルカンの取得総額が正しくありません。');
+ if(typeof amount!=='number' || !Number.isFinite(amount) || amount<=0)throw new Error('積立額が正しくありません。');
+ calculateFundValue(units,1);
+ const next={...asset,invested:asset.invested+amount};
+ if(typeof asset.fundNav==='number' && Number.isFinite(asset.fundNav) && asset.fundNav>0)next.amount=calculateFundValue(units,asset.fundNav);
+ return next;
+}
 function readPortfolio(){try{const data=JSON.parse(localStorage.getItem(PORTFOLIO_KEY)||'null');return data?.version===1&&Array.isArray(data.assets)?data:null;}catch{return null;}}
 function readUnits(){try{const data=JSON.parse(localStorage.getItem(UNITS_KEY)||'{}');return data&&typeof data==='object'&&!Array.isArray(data)?data:{};}catch{return {};}}
 function writeUnits(map){localStorage.setItem(UNITS_KEY,JSON.stringify(map));}
+function readContributions(){try{const data=JSON.parse(localStorage.getItem(CONTRIBUTION_KEY)||'{}');return data&&typeof data==='object'&&!Array.isArray(data)?data:{};}catch{return {};}}
+function writeContributions(map){localStorage.setItem(CONTRIBUTION_KEY,JSON.stringify(map));}
 function setup(){
  const panel=document.querySelector('#fund-auto');if(!panel)return;
  const select=document.querySelector('#fund-asset'),input=document.querySelector('#fund-units'),save=document.querySelector('#fund-save'),refresh=document.querySelector('#fund-refresh'),status=document.querySelector('#fund-status');
+ let monthly=document.querySelector('#fund-monthly');
+ if(!monthly){monthly=document.createElement('button');monthly.id='fund-monthly';monthly.type='button';monthly.className='primary';monthly.textContent='今月分10万円を反映';save.insertAdjacentElement('afterend',monthly);const note=document.createElement('p');note.className='details';note.textContent='積立が約定したら、新しい保有口数を入力してこのボタンを押します。取得総額に10万円を加算し、同じ月の二重反映を防ぎます。';monthly.insertAdjacentElement('afterend',note);}
  const setStatus=text=>{status.textContent=text;};
- const populate=()=>{const portfolio=readPortfolio();const funds=portfolio?.assets.filter(a=>a.type==='fund')??[];const current=select.value;select.replaceChildren();for(const fund of funds){const option=document.createElement('option');option.value=fund.id;option.textContent=`${fund.name}${fund.institution?`（${fund.institution}／${fund.account}）`:''}`;select.append(option);}if(current&&funds.some(f=>f.id===current))select.value=current;select.disabled=!funds.length;save.disabled=!funds.length;refresh.disabled=!funds.length;if(!funds.length){input.value='';input.disabled=true;setStatus('オルカンを登録すると自動更新を設定できます。');return;}input.disabled=false;const units=readUnits();input.value=units[select.value]??'';};
+ const populate=()=>{const portfolio=readPortfolio();const funds=portfolio?.assets.filter(a=>a.type==='fund')??[];const current=select.value;select.replaceChildren();for(const fund of funds){const option=document.createElement('option');option.value=fund.id;option.textContent=`${fund.name}${fund.institution?`（${fund.institution}／${fund.account}）`:''}`;select.append(option);}if(current&&funds.some(f=>f.id===current))select.value=current;const disabled=!funds.length;select.disabled=disabled;save.disabled=disabled;monthly.disabled=disabled;refresh.disabled=disabled;if(disabled){input.value='';input.disabled=true;setStatus('オルカンを登録すると自動更新を設定できます。');return;}input.disabled=false;const units=readUnits();input.value=units[select.value]??'';};
  const refreshFund=async({reload=true}={})=>{const portfolio=readPortfolio();if(!portfolio){setStatus('資産データを読み込めませんでした。');return;}const unitsMap=readUnits();const targets=portfolio.assets.filter(a=>a.type==='fund'&&Number.isInteger(Number(unitsMap[a.id]))&&Number(unitsMap[a.id])>0);if(!targets.length){setStatus('保有口数を保存すると基準価額から評価額を自動更新します。');return;}const endpoint=localStorage.getItem(ENDPOINT_KEY)||'';if(!endpoint){setStatus('先に「価格取得サービスのURL」を設定してください。');return;}try{setStatus('オルカンの基準価額を取得しています…');const url=new URL(endpoint);url.searchParams.set('fund',FUND_CODE);const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),12000);let response;try{response=await fetch(url,{signal:controller.signal,cache:'no-store',credentials:'omit',referrerPolicy:'no-referrer'});}finally{clearTimeout(timer);}if(!response.ok)throw new Error(response.status===429?'取得サービスが混雑しています。時間を置いて再試行してください。':'基準価額を取得できませんでした。');const quote=validateFundNav(await response.json());let changed=false;const assets=portfolio.assets.map(asset=>{if(asset.type!=='fund')return asset;const units=Number(unitsMap[asset.id]);if(!Number.isInteger(units)||units<=0)return asset;const amount=calculateFundValue(units,quote.nav);if(asset.amount===amount&&asset.fundNav===quote.nav&&asset.fundNavDate===quote.date&&asset.fundNavSource===(quote.source??'Yahoo!ファイナンス'))return asset;changed=true;return {...asset,amount,fundNav:quote.nav,fundNavDate:quote.date,fundNavSource:quote.source??'Yahoo!ファイナンス'};});if(changed){localStorage.setItem(PORTFOLIO_KEY,JSON.stringify({...portfolio,assets,updated:new Date().toISOString()}));const message=`オルカンを更新しました。基準価額 ${quote.nav.toLocaleString('ja-JP')}円（${quote.date}）`;if(reload){sessionStorage.setItem('portfolio-fund-message',message);location.reload();return;}setStatus(message);}else setStatus(`基準価額 ${quote.nav.toLocaleString('ja-JP')}円（${quote.date}）・評価額は最新です。`);}catch(error){setStatus(error.name==='AbortError'?'基準価額の取得がタイムアウトしました。':error.message);}};
  select.addEventListener('change',()=>{input.value=readUnits()[select.value]??'';});
  save.addEventListener('click',()=>{try{const units=Number(input.value);calculateFundValue(units,1);const map=readUnits();map[select.value]=units;writeUnits(map);setStatus('保有口数を保存しました。基準価額を取得します…');refreshFund();}catch(error){setStatus(error.message);}});
+ monthly.addEventListener('click',()=>{try{const portfolio=readPortfolio();if(!portfolio)throw new Error('資産データを読み込めませんでした。');const fund=portfolio.assets.find(a=>a.id===select.value&&a.type==='fund');if(!fund)throw new Error('対象のオルカンを選んでください。');const units=Number(input.value);const month=tokyoMonthKey();const contributions=readContributions();if(contributions[fund.id]===month)throw new Error(`${Number(month.slice(5))}月分の10万円は反映済みです。二重計上を防止しました。`);const label=`${Number(month.slice(0,4))}年${Number(month.slice(5))}月分として10万円を取得総額に加算し、保有口数 ${units.toLocaleString('ja-JP')}口を保存します。よろしいですか？`;if(typeof confirm==='function'&&!confirm(label))return;const updated=applyMonthlyContribution(fund,units);const assets=portfolio.assets.map(a=>a.id===fund.id?updated:a);localStorage.setItem(PORTFOLIO_KEY,JSON.stringify({...portfolio,assets,updated:new Date().toISOString()}));const unitsMap=readUnits();unitsMap[fund.id]=units;writeUnits(unitsMap);contributions[fund.id]=month;writeContributions(contributions);sessionStorage.setItem('portfolio-fund-message',`${Number(month.slice(5))}月分の積立10万円を反映しました。新しい保有口数も保存済みです。`);location.reload();}catch(error){setStatus(error.message);}});
  refresh.addEventListener('click',()=>refreshFund());
  populate();const message=sessionStorage.getItem('portfolio-fund-message');if(message){sessionStorage.removeItem('portfolio-fund-message');setStatus(message);}setTimeout(()=>refreshFund(),1500);setInterval(()=>{populate();refreshFund();},3600000);
 }
